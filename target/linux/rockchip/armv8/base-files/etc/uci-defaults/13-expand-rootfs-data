@@ -1,0 +1,72 @@
+#!/bin/sh
+#
+# Two-phase rootfs_data expansion for eMMC devices.
+#
+# Phase 1 (this script, runs once on first boot after flash):
+#   Convert the MBR partition table to GPT and create a new partition
+#   spanning all remaining free space. Reboot immediately.
+#
+# Phase 2 (automatic on second boot):
+#   The kernel reads the fresh GPT. fstools' partname driver finds the
+#   new partition (PARTNAME=rootfs_data), formats it, and mounts it as
+#   the writable overlay. No data migration is needed because the first
+#   boot has no user data yet.
+#
+# Why not format+reboot in one step:
+#   The kernel refuses to re-read the partition table of a mounted disk.
+#   We must reboot for the new partition to become visible.
+#
+
+# Only for eMMC devices
+[ -b /dev/mmcblk0 ] || exit 0
+
+# Bail out if a GPT partition named rootfs_data already exists.
+# This handles both the second-boot case (p3 visible after reboot)
+# and re-flash with leftover GPT (fstools already using p3).
+for uevent in /sys/class/block/mmcblk0p*/uevent; do
+	grep -q "PARTNAME=rootfs_data" "$uevent" 2>/dev/null && exit 0
+done
+
+# Only act when overlay is still on a loop device
+CURRENT_OVL=$(block info 2>/dev/null | grep 'LABEL="rootfs_data"' | sed -n 's/^\([^:]*\):.*/\1/p')
+case "$CURRENT_OVL" in
+	/dev/loop*) ;;
+	*) exit 0 ;;
+esac
+
+ROOTDISK="/dev/mmcblk0"
+
+# Safety: sgdisk must be available
+if [ ! -x /usr/bin/sgdisk ]; then
+	logger -t expand-rootfs "sgdisk not found, skipping"
+	exit 0
+fi
+
+logger -t expand-rootfs "phase 1: creating rootfs_data partition and rebooting"
+
+# Step 1: Destroy leftover GPT from previous installs
+/usr/bin/sgdisk -z "$ROOTDISK" 2>/dev/null
+
+# Step 2: Convert MBR to GPT
+if ! /usr/bin/sgdisk -g "$ROOTDISK" 2>/dev/null; then
+	logger -t expand-rootfs "GPT conversion failed"
+	exit 0
+fi
+
+# Step 3: Create partition 3 from all remaining free space
+if ! /usr/bin/sgdisk -n 3:0:0 -t 3:8300 -c 3:rootfs_data "$ROOTDISK" 2>/dev/null; then
+	logger -t expand-rootfs "partition creation failed"
+	exit 0
+fi
+
+# Step 4: Wipe any existing ext4 superblock on the new partition.
+# The image only covers the first ~1GB, so a previous p3 filesystem
+# may survive reflash.  We write zeros via the raw disk because the
+# kernel won't expose /dev/mmcblk0p3 while the disk is mounted.
+P3_START=$(/usr/bin/sgdisk -i 3 "$ROOTDISK" 2>/dev/null | awk '/^First sector:/{print $3}')
+if [ -n "$P3_START" ] && [ "$P3_START" -gt 0 ] 2>/dev/null; then
+	dd if=/dev/zero of="$ROOTDISK" bs=512 seek="$P3_START" count=8192 2>/dev/null
+fi
+
+logger -t expand-rootfs "phase 1 done, rebooting for phase 2"
+reboot

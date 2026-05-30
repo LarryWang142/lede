@@ -322,7 +322,7 @@ define Device/hinlink_common
   DEVICE_VENDOR := HINLINK
   UBOOT_DEVICE_NAME := generic-rk3568
   IMAGE/sysupgrade.img.gz := boot-common | boot-script vop | pine64-img | gzip | append-metadata
-  DEVICE_PACKAGES := kmod-ata-ahci-dwc kmod-drm-rockchip kmod-mt7921e kmod-r8125-rss wpad-openssl
+  DEVICE_PACKAGES := kmod-ata-ahci-dwc kmod-drm-rockchip kmod-mt7921e kmod-r8125-rss wpad-openssl gdisk sgdisk
 endef
 
 define Device/hinlink_opc-h28k
